@@ -1,82 +1,424 @@
 ---
-summary: "Run Moltbot Gateway 24/7 on a cheap Hetzner VPS (Docker) with durable state and baked-in binaries"
+summary: "Run Moltbot Gateway 24/7 on a Hetzner VPS with full security hardening"
 read_when:
   - You want Moltbot running 24/7 on a cloud VPS (not your laptop)
   - You want a production-grade, always-on Gateway on your own VPS
   - You want full control over persistence, binaries, and restart behavior
-  - You are running Moltbot in Docker on Hetzner or a similar provider
+  - You need maximum security for sensitive data handling
 ---
 
-# Moltbot on Hetzner (Docker, Production VPS Guide)
+# Moltbot on Hetzner VPS
+
+Run a persistent, secure Moltbot Gateway on Hetzner for ~$4-5/month.
+
+---
+
+## One-Command Installation
+
+SSH into your fresh Hetzner VPS as root and run:
+
+```bash
+curl -fsSL https://get.molt.bot/hetzner | bash
+```
+
+This interactive installer will:
+1. Create a secure non-root user
+2. Install Node.js, Docker, and Moltbot
+3. Configure maximum security settings
+4. Set up firewall and services
+5. Guide you through domain and API key setup
+
+### Non-Interactive Installation
+
+For automation, pass all options via flags:
+
+```bash
+# Paranoid mode (Cloudflare Tunnel, recommended for sensitive data)
+curl -fsSL https://get.molt.bot/hetzner | bash -s -- \
+  --domain ai.example.com \
+  --paranoid \
+  --api-key sk-ant-api03-YOUR_KEY \
+  --yes
+
+# Standard mode (Caddy reverse proxy)
+curl -fsSL https://get.molt.bot/hetzner | bash -s -- \
+  --domain ai.example.com \
+  --standard \
+  --api-key sk-ant-api03-YOUR_KEY \
+  --yes
+```
+
+### Security Levels
+
+| Level | Open Ports | Best For |
+|-------|------------|----------|
+| **Standard** | SSH + HTTPS | General use |
+| **Paranoid** | SSH only | Sensitive data, maximum security |
+
+**After installation**, add your user ID to the allowlist:
+
+```bash
+moltbot config set channels.telegram.allowFrom '["YOUR_TELEGRAM_ID"]'
+```
+
+---
+
+## Manual Installation
+
+If you prefer step-by-step control, follow the sections below.
+
+## Prerequisites
+
+- [ ] Hetzner Cloud account ([signup](https://www.hetzner.com/cloud))
+- [ ] SSH key pair generated locally
+- [ ] Domain with DNS access (optional for Standard, required for Paranoid)
+- [ ] Cloudflare account (Paranoid mode only)
+- [ ] Anthropic API key (or other LLM provider key)
+
+## Step 1: Create Hetzner VPS
+
+### 1.1 Log into Hetzner Cloud Console
+
+Go to [console.hetzner.cloud](https://console.hetzner.cloud) and create a new project.
+
+### 1.2 Create Server
+
+Click **Add Server** with these settings:
+
+| Setting | Recommended Value |
+|---------|-------------------|
+| **Location** | Closest to you (e.g., `fsn1`, `nbg1`, `hel1`) |
+| **Image** | Ubuntu 24.04 |
+| **Type** | CX22 (2 vCPU, 4GB RAM) minimum |
+| **Networking** | Public IPv4 ✓, IPv6 ✓ |
+| **SSH Key** | Add your public key |
+| **Name** | `moltbot` |
+
+### 1.3 Note Your Server IP
+
+Copy the public IPv4 address after creation.
+
+## Step 2: Initial Server Setup
+
+### 2.1 Connect and Create Non-Root User
+
+```bash
+# Connect as root
+ssh root@YOUR_SERVER_IP
+
+# Create user
+adduser moltbot
+usermod -aG sudo moltbot
+
+# Copy SSH keys
+mkdir -p /home/moltbot/.ssh
+cp ~/.ssh/authorized_keys /home/moltbot/.ssh/
+chown -R moltbot:moltbot /home/moltbot/.ssh
+chmod 700 /home/moltbot/.ssh
+chmod 600 /home/moltbot/.ssh/authorized_keys
+
+# Disable root login
+sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+# Exit and reconnect as moltbot user
+exit
+```
+
+### 2.2 Reconnect as Non-Root User
+
+```bash
+ssh moltbot@YOUR_SERVER_IP
+```
+
+## Step 3: Configure DNS (If Using a Domain)
+
+### For Standard Mode (Caddy)
+
+Add an A record in your DNS provider:
+
+| Type | Name | Value |
+|------|------|-------|
+| A | `ai` (or your subdomain) | `YOUR_SERVER_IP` |
+
+### For Paranoid Mode (Cloudflare Tunnel)
+
+Ensure your domain is on Cloudflare. The script creates DNS records automatically.
+
+## Step 4: Run Installation
+
+### Option A: Standard Mode
+
+```bash
+# Download
+curl -fsSL https://raw.githubusercontent.com/moltbot/moltbot/main/scripts/hetzner-install.sh -o install.sh
+chmod +x install.sh
+
+# With Caddy reverse proxy (recommended)
+./install.sh --with-docker --with-caddy --domain ai.example.com
+
+# Or localhost only (SSH tunnel access)
+./install.sh --with-docker
+```
+
+### Option B: Paranoid Mode (Recommended for Sensitive Data)
+
+```bash
+# Download
+curl -fsSL https://raw.githubusercontent.com/moltbot/moltbot/main/scripts/hetzner-install-paranoid.sh -o install.sh
+chmod +x install.sh
+
+# Run (will prompt for Cloudflare authentication)
+./install.sh --domain ai.example.com
+```
+
+**What the scripts do:**
+
+1. Install Node.js 22 and Docker
+2. Install Moltbot globally
+3. Create hardened configuration
+4. Generate secure tokens
+5. Set up systemd services
+6. Configure firewall
+7. (Paranoid) Set up Cloudflare Tunnel
+
+## Step 5: Save Your Tokens
+
+The script outputs two tokens. **Save these securely:**
+
+```
+Gateway Token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Hooks Token:   xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+## Step 6: Add Your API Key
+
+```bash
+echo "ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY" >> ~/.clawdbot/.env
+chmod 600 ~/.clawdbot/.env
+```
+
+## Step 7: Configure Allowed Users
+
+All channels are locked to allowlist by default. Add your user IDs:
+
+```bash
+# Telegram (get ID from @userinfobot)
+moltbot config set channels.telegram.allowFrom '["YOUR_TELEGRAM_ID"]'
+
+# Discord (enable Developer Mode, right-click username, Copy ID)
+moltbot config set channels.discord.allowFrom '["YOUR_DISCORD_ID"]'
+
+# WhatsApp (country code + number, no + or spaces)
+moltbot config set channels.whatsapp.allowFrom '["1234567890"]'
+```
+
+## Step 8: Start Services
+
+```bash
+# Start gateway
+systemctl --user start moltbot
+
+# Paranoid mode: also start tunnel
+systemctl --user start cloudflared
+
+# Check status
+systemctl --user status moltbot
+```
+
+## Step 9: Verify Installation
+
+```bash
+# Download verification script
+curl -fsSL https://raw.githubusercontent.com/moltbot/moltbot/main/scripts/hetzner-verify.sh -o verify.sh
+chmod +x verify.sh
+
+# Run
+./verify.sh
+```
+
+Expected output:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Moltbot Security Verification (13 Domains)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Gateway Exposure
+  ✓ Gateway bound to loopback (localhost only)
+  ✓ Token authentication configured
+...
+Summary
+  ✓ Passed:  18
+  ! Warnings: 0
+  ✗ Failed:  0
+
+All security checks passed!
+```
+
+## Step 10: Connect Channels (Optional)
+
+### Telegram Bot
+
+1. Create bot via [@BotFather](https://t.me/BotFather)
+2. Add token:
+
+```bash
+moltbot config set channels.telegram.token "YOUR_BOT_TOKEN"
+systemctl --user restart moltbot
+```
+
+### WhatsApp
+
+```bash
+moltbot channels login --channel whatsapp
+# Scan QR code
+```
+
+---
+
+## Maintenance
+
+### View Logs
+
+```bash
+journalctl --user -u moltbot -f
+journalctl --user -u cloudflared -f  # Paranoid only
+```
+
+### Update Moltbot
+
+```bash
+sudo npm install -g moltbot@latest
+systemctl --user restart moltbot
+```
+
+### Re-run Security Audit
+
+```bash
+moltbot security audit --deep
+moltbot security audit --fix
+```
+
+---
+
+## Security Architecture
+
+### Standard Mode
+
+```
+Internet → Caddy (:443) → localhost:18789 → Docker Sandbox
+           ↑ TLS          (Gateway)         ↑ network=none
+```
+
+### Paranoid Mode
+
+```
+Internet → Cloudflare → Tunnel → localhost:18789 → Docker Sandbox
+           ↑ DDoS       ↑ outbound (Gateway)       ↑ network=none
+           ↑ WAF        ↑ encrypted                ↑ workspace=none
+```
+
+---
+
+## Security Checklist
+
+After installation, verify:
+
+- [ ] Gateway bound to localhost (`gateway.bind: loopback`)
+- [ ] Authentication token set (`gateway.auth.token`)
+- [ ] All channels set to allowlist (`dmPolicy: allowlist`)
+- [ ] Groups disabled or allowlisted (`groupPolicy`)
+- [ ] Sandbox enabled (`sandbox.mode: all`)
+- [ ] Docker network isolated (`docker.network: none`)
+- [ ] Elevated tools disabled (`tools.elevated.enabled: false`)
+- [ ] File permissions correct (700/600)
+- [ ] Firewall active
+- [ ] No API keys in config file (use `.env`)
+
+---
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `~/.clawdbot/moltbot.json` | Main configuration |
+| `~/.clawdbot/.env` | API keys and secrets |
+| `~/.clawdbot/credentials/` | Channel credentials |
+| `~/.clawdbot/sessions/` | Conversation history |
+| `~/.config/systemd/user/moltbot.service` | Systemd service |
+| `~/.cloudflared/config.yml` | Tunnel config (Paranoid) |
+
+---
+
+## Troubleshooting
+
+### Gateway Won't Start
+
+```bash
+journalctl --user -u moltbot --no-pager -n 50
+moltbot doctor
+```
+
+### Tunnel Not Connecting
+
+```bash
+cloudflared tunnel info moltbot
+cloudflared tunnel login  # Re-authenticate
+```
+
+### Permission Errors
+
+```bash
+moltbot security audit --fix
+chmod 700 ~/.clawdbot
+chmod 600 ~/.clawdbot/moltbot.json ~/.clawdbot/.env
+```
+
+---
+
+# Docker Installation (Advanced)
+
+For operators who want full control over the Docker build process.
 
 ## Goal
-Run a persistent Moltbot Gateway on a Hetzner VPS using Docker, with durable state, baked-in binaries, and safe restart behavior.
 
-If you want “Moltbot 24/7 for ~$5”, this is the simplest reliable setup.
-Hetzner pricing changes; pick the smallest Debian/Ubuntu VPS and scale up if you hit OOMs.
-
-## What are we doing (simple terms)?
-
-- Rent a small Linux server (Hetzner VPS)
-- Install Docker (isolated app runtime)
-- Start the Moltbot Gateway in Docker
-- Persist `~/.clawdbot` + `~/clawd` on the host (survives restarts/rebuilds)
-- Access the Control UI from your laptop via an SSH tunnel
-
-The Gateway can be accessed via:
-- SSH port forwarding from your laptop
-- Direct port exposure if you manage firewalling and tokens yourself
-
-This guide assumes Ubuntu or Debian on Hetzner.  
-If you are on another Linux VPS, map packages accordingly.
-For the generic Docker flow, see [Docker](/install/docker).
-
----
-
-## Quick path (experienced operators)
-
-1) Provision Hetzner VPS  
-2) Install Docker  
-3) Clone Moltbot repository  
-4) Create persistent host directories  
-5) Configure `.env` and `docker-compose.yml`  
-6) Bake required binaries into the image  
-7) `docker compose up -d`  
-8) Verify persistence and Gateway access
-
----
+Run a persistent Moltbot Gateway using Docker Compose with durable state and baked-in binaries.
 
 ## What you need
 
-- Hetzner VPS with root access  
-- SSH access from your laptop  
-- Basic comfort with SSH + copy/paste  
-- ~20 minutes  
-- Docker and Docker Compose  
-- Model auth credentials  
-- Optional provider credentials  
-  - WhatsApp QR  
-  - Telegram bot token  
-  - Gmail OAuth  
+- Hetzner VPS with root access
+- SSH access from your laptop
+- ~20 minutes
+- Docker and Docker Compose
+- Model auth credentials
+- Optional: WhatsApp QR, Telegram bot token, Gmail OAuth  
+
+## Quick Path (Experienced Operators)
+
+1. Provision Hetzner VPS (Ubuntu/Debian)
+2. Install Docker
+3. Clone Moltbot repository
+4. Create persistent host directories
+5. Configure `.env` and `docker-compose.yml`
+6. Bake required binaries into the image
+7. `docker compose up -d`
+8. Verify persistence and Gateway access
 
 ---
 
 ## 1) Provision the VPS
 
-Create an Ubuntu or Debian VPS in Hetzner.
-
-Connect as root:
+Create an Ubuntu or Debian VPS in Hetzner. Connect as root:
 
 ```bash
 ssh root@YOUR_VPS_IP
 ```
 
-This guide assumes the VPS is stateful.
-Do not treat it as disposable infrastructure.
-
 ---
 
-## 2) Install Docker (on the VPS)
+## 2) Install Docker
 
 ```bash
 apt-get update
