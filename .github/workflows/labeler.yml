@@ -25,7 +25,96 @@ jobs:
           configuration-path: .github/labeler.yml
           repo-token: ${{ steps.app-token.outputs.token }}
           sync-labels: true
-      - name: Apply maintainer label for org members
+      - name: Apply PR size label
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pullRequest = context.payload.pull_request;
+            if (!pullRequest) {
+              return;
+            }
+
+            const sizeLabels = ["size: XS", "size: S", "size: M", "size: L", "size: XL"];
+            const labelColor = "b76e79";
+
+            for (const label of sizeLabels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                });
+              } catch (error) {
+                if (error?.status !== 404) {
+                  throw error;
+                }
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                  color: labelColor,
+                });
+              }
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+              per_page: 100,
+            });
+
+            const excludedLockfiles = new Set(["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"]);
+            const totalChangedLines = files.reduce((total, file) => {
+              const path = file.filename ?? "";
+              if (path === "docs.acp.md" || path.startsWith("docs/") || excludedLockfiles.has(path)) {
+                return total;
+              }
+              return total + (file.additions ?? 0) + (file.deletions ?? 0);
+            }, 0);
+
+            let targetSizeLabel = "size: XL";
+            if (totalChangedLines < 50) {
+              targetSizeLabel = "size: XS";
+            } else if (totalChangedLines < 200) {
+              targetSizeLabel = "size: S";
+            } else if (totalChangedLines < 500) {
+              targetSizeLabel = "size: M";
+            } else if (totalChangedLines < 1000) {
+              targetSizeLabel = "size: L";
+            }
+
+            const currentLabels = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pullRequest.number,
+              per_page: 100,
+            });
+
+            for (const label of currentLabels) {
+              const name = label.name ?? "";
+              if (!sizeLabels.includes(name)) {
+                continue;
+              }
+              if (name === targetSizeLabel) {
+                continue;
+              }
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pullRequest.number,
+                name,
+              });
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pullRequest.number,
+              labels: [targetSizeLabel],
+            });
+      - name: Apply maintainer or trusted-contributor label
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           github-token: ${{ steps.app-token.outputs.token }}
@@ -34,6 +123,12 @@ jobs:
             if (!login) {
               return;
             }
+
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const trustedLabel = "trusted-contributor";
+            const experiencedLabel = "experienced-contributor";
+            const trustedThreshold = 4;
+            const experiencedThreshold = 10;
 
             let isMaintainer = false;
             try {
@@ -49,15 +144,38 @@ jobs:
               }
             }
 
-            if (!isMaintainer) {
+            if (isMaintainer) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: ["maintainer"],
+              });
               return;
             }
 
-            await github.rest.issues.addLabels({
-              ...context.repo,
-              issue_number: context.payload.pull_request.number,
-              labels: ["maintainer"],
+            const mergedQuery = `repo:${repo} is:pr is:merged author:${login}`;
+            const merged = await github.rest.search.issuesAndPullRequests({
+              q: mergedQuery,
+              per_page: 1,
             });
+            const mergedCount = merged?.data?.total_count ?? 0;
+
+            if (mergedCount >= experiencedThreshold) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: [experiencedLabel],
+              });
+              return;
+            }
+
+            if (mergedCount >= trustedThreshold) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: [trustedLabel],
+              });
+            }
 
   label-issues:
     permissions:
@@ -69,7 +187,7 @@ jobs:
         with:
           app-id: "2729701"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-      - name: Apply maintainer label for org members
+      - name: Apply maintainer or trusted-contributor label
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           github-token: ${{ steps.app-token.outputs.token }}
@@ -78,6 +196,12 @@ jobs:
             if (!login) {
               return;
             }
+
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const trustedLabel = "trusted-contributor";
+            const experiencedLabel = "experienced-contributor";
+            const trustedThreshold = 4;
+            const experiencedThreshold = 10;
 
             let isMaintainer = false;
             try {
@@ -93,12 +217,35 @@ jobs:
               }
             }
 
-            if (!isMaintainer) {
+            if (isMaintainer) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                labels: ["maintainer"],
+              });
               return;
             }
 
-            await github.rest.issues.addLabels({
-              ...context.repo,
-              issue_number: context.payload.issue.number,
-              labels: ["maintainer"],
+            const mergedQuery = `repo:${repo} is:pr is:merged author:${login}`;
+            const merged = await github.rest.search.issuesAndPullRequests({
+              q: mergedQuery,
+              per_page: 1,
             });
+            const mergedCount = merged?.data?.total_count ?? 0;
+
+            if (mergedCount >= experiencedThreshold) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                labels: [experiencedLabel],
+              });
+              return;
+            }
+
+            if (mergedCount >= trustedThreshold) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                labels: [trustedLabel],
+              });
+            }
