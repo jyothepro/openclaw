@@ -89,6 +89,7 @@ import {
 } from "../system-prompt.js";
 import { splitSdkTools } from "../tool-split.js";
 import { describeUnknownError, mapThinkingLevel } from "../utils.js";
+import { flushPendingToolResultsAfterIdle } from "../wait-for-idle-before-flush.js";
 import { detectAndLoadPromptImages } from "./images.js";
 
 export function injectHistoryImagesIntoMessages(
@@ -428,6 +429,7 @@ export async function runEmbeddedAttempt(
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
+        inputProvenance: params.inputProvenance,
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
       });
       trackSessionManagerAccess(params.sessionFile);
@@ -454,6 +456,9 @@ export async function runEmbeddedAttempt(
         modelId: params.modelId,
         model: params.model,
       });
+
+      // Get hook runner early so it's available when creating tools
+      const hookRunner = getGlobalHookRunner();
 
       const { builtInTools, customTools } = splitSdkTools({
         tools,
@@ -573,7 +578,10 @@ export async function runEmbeddedAttempt(
           activeSession.agent.replaceMessages(limited);
         }
       } catch (err) {
-        sessionManager.flushPendingToolResults?.();
+        await flushPendingToolResultsAfterIdle({
+          agent: activeSession?.agent,
+          sessionManager,
+        });
         activeSession.dispose();
         throw err;
       }
@@ -632,6 +640,7 @@ export async function runEmbeddedAttempt(
       const subscription = subscribeEmbeddedPiSession({
         session: activeSession,
         runId: params.runId,
+        hookRunner: getGlobalHookRunner() ?? undefined,
         verboseLevel: params.verboseLevel,
         reasoningMode: params.reasoningLevel ?? "off",
         toolResultFormat: params.toolResultFormat,
@@ -715,8 +724,7 @@ export async function runEmbeddedAttempt(
         }
       }
 
-      // Get hook runner once for both before_agent_start and agent_end hooks
-      const hookRunner = getGlobalHookRunner();
+      // Hook runner was already obtained earlier before tool creation
       const hookAgentId =
         typeof params.agentId === "string" && params.agentId.trim()
           ? normalizeAgentId(params.agentId)
@@ -794,7 +802,10 @@ export async function runEmbeddedAttempt(
             historyMessages: activeSession.messages,
             maxBytes: MAX_IMAGE_BYTES,
             // Enforce sandbox path restrictions when sandbox is enabled
-            sandboxRoot: sandbox?.enabled ? sandbox.workspaceDir : undefined,
+            sandbox:
+              sandbox?.enabled && sandbox?.fsBridge
+                ? { root: sandbox.workspaceDir, bridge: sandbox.fsBridge }
+                : undefined,
           });
 
           // Inject history images into their original message positions.
@@ -933,7 +944,17 @@ export async function runEmbeddedAttempt(
       };
     } finally {
       // Always tear down the session (and release the lock) before we leave this attempt.
-      sessionManager?.flushPendingToolResults?.();
+      //
+      // BUGFIX: Wait for the agent to be truly idle before flushing pending tool results.
+      // pi-agent-core's auto-retry resolves waitForRetry() on assistant message receipt,
+      // *before* tool execution completes in the retried agent loop. Without this wait,
+      // flushPendingToolResults() fires while tools are still executing, inserting
+      // synthetic "missing tool result" errors and causing silent agent failures.
+      // See: https://github.com/openclaw/openclaw/issues/8643
+      await flushPendingToolResultsAfterIdle({
+        agent: session?.agent,
+        sessionManager,
+      });
       session?.dispose();
       await sessionLock.release();
     }
