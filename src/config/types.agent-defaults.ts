@@ -190,6 +190,11 @@ export type AgentDefaultsConfig = {
   timeoutSeconds?: number;
   /** Max inbound media size in MB for agent-visible attachments (text note or future image attach). */
   mediaMaxMb?: number;
+  /**
+   * Max image side length (pixels) when sanitizing base64 image payloads in transcripts/tool results.
+   * Default: 1200.
+   */
+  imageMaxDimensionPx?: number;
   typingIntervalSeconds?: number;
   /** Typing indicator start mode (never|instant|thinking|message). */
   typingMode?: TypingMode;
@@ -220,6 +225,8 @@ export type AgentDefaultsConfig = {
     prompt?: string;
     /** Max chars allowed after HEARTBEAT_OK before delivery (default: 30). */
     ackMaxChars?: number;
+    /** Suppress tool error warning payloads during heartbeat runs. */
+    suppressToolErrorWarnings?: boolean;
     /**
      * When enabled, deliver the model's reasoning payload for heartbeat runs (when available)
      * as a separate message prefixed with `Reasoning:` (same as `/reasoning on`).
