@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { lookupContextTokens } from "../../agents/context.js";
 import { resolveCronStyleNow } from "../../agents/current-time.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
@@ -163,8 +164,46 @@ export function resolveMemoryFlushContextWindowTokens(params: {
   agentCfgContextTokens?: number;
 }): number {
   return (
-    lookupContextTokens(params.modelId) ?? params.agentCfgContextTokens ?? DEFAULT_CONTEXT_TOKENS
+    lookupContextTokens(params.modelId, { allowAsyncLoad: false }) ??
+    params.agentCfgContextTokens ??
+    DEFAULT_CONTEXT_TOKENS
   );
+}
+
+function resolvePositiveTokenCount(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function resolveMemoryFlushGateState<
+  TEntry extends Pick<SessionEntry, "totalTokens" | "totalTokensFresh">,
+>(params: {
+  entry?: TEntry;
+  tokenCount?: number;
+  contextWindowTokens: number;
+  reserveTokensFloor: number;
+  softThresholdTokens: number;
+}): { entry: TEntry; totalTokens: number; threshold: number } | null {
+  if (!params.entry) {
+    return null;
+  }
+
+  const totalTokens =
+    resolvePositiveTokenCount(params.tokenCount) ?? resolveFreshSessionTotalTokens(params.entry);
+  if (!totalTokens || totalTokens <= 0) {
+    return null;
+  }
+
+  const contextWindow = Math.max(1, Math.floor(params.contextWindowTokens));
+  const reserveTokens = Math.max(0, Math.floor(params.reserveTokensFloor));
+  const softThreshold = Math.max(0, Math.floor(params.softThresholdTokens));
+  const threshold = Math.max(0, contextWindow - reserveTokens - softThreshold);
+  if (threshold <= 0) {
+    return null;
+  }
+
+  return { entry: params.entry, totalTokens, threshold };
 }
 
 export function shouldRunMemoryFlush(params: {
@@ -182,36 +221,32 @@ export function shouldRunMemoryFlush(params: {
   reserveTokensFloor: number;
   softThresholdTokens: number;
 }): boolean {
-  if (!params.entry) {
+  const state = resolveMemoryFlushGateState(params);
+  if (!state || state.totalTokens < state.threshold) {
     return false;
   }
 
-  const override = params.tokenCount;
-  const overrideTokens =
-    typeof override === "number" && Number.isFinite(override) && override > 0
-      ? Math.floor(override)
-      : undefined;
-
-  const totalTokens = overrideTokens ?? resolveFreshSessionTotalTokens(params.entry);
-  if (!totalTokens || totalTokens <= 0) {
-    return false;
-  }
-  const contextWindow = Math.max(1, Math.floor(params.contextWindowTokens));
-  const reserveTokens = Math.max(0, Math.floor(params.reserveTokensFloor));
-  const softThreshold = Math.max(0, Math.floor(params.softThresholdTokens));
-  const threshold = Math.max(0, contextWindow - reserveTokens - softThreshold);
-  if (threshold <= 0) {
-    return false;
-  }
-  if (totalTokens < threshold) {
-    return false;
-  }
-
-  if (hasAlreadyFlushedForCurrentCompaction(params.entry)) {
+  if (hasAlreadyFlushedForCurrentCompaction(state.entry)) {
     return false;
   }
 
   return true;
+}
+
+export function shouldRunPreflightCompaction(params: {
+  entry?: Pick<SessionEntry, "totalTokens" | "totalTokensFresh">;
+  /**
+   * Optional projected token count override for pre-run compaction gating.
+   * When provided, this value is treated as a fresh estimate and used instead
+   * of any cached SessionEntry total.
+   */
+  tokenCount?: number;
+  contextWindowTokens: number;
+  reserveTokensFloor: number;
+  softThresholdTokens: number;
+}): boolean {
+  const state = resolveMemoryFlushGateState(params);
+  return Boolean(state && state.totalTokens >= state.threshold);
 }
 
 /**
@@ -225,4 +260,21 @@ export function hasAlreadyFlushedForCurrentCompaction(
   const compactionCount = entry.compactionCount ?? 0;
   const lastFlushAt = entry.memoryFlushCompactionCount;
   return typeof lastFlushAt === "number" && lastFlushAt === compactionCount;
+}
+
+/**
+ * Compute a lightweight content hash from the tail of a session transcript.
+ * Used for state-based flush deduplication — if the hash hasn't changed since
+ * the last flush, the context is effectively the same and flushing again would
+ * produce duplicate memory entries.
+ *
+ * Hash input: `messages.length` + content of the last 3 user/assistant messages.
+ * Algorithm: SHA-256 truncated to 16 hex chars (collision-resistant enough for dedup).
+ */
+export function computeContextHash(messages: Array<{ role?: string; content?: unknown }>): string {
+  const userAssistant = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const tail = userAssistant.slice(-3);
+  const payload = `${messages.length}:${tail.map((m, i) => `[${i}:${m.role ?? ""}]${typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")}`).join("\x00")}`;
+  const hash = crypto.createHash("sha256").update(payload).digest("hex");
+  return hash.slice(0, 16);
 }

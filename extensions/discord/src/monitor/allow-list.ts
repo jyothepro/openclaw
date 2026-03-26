@@ -1,12 +1,12 @@
 import type { Guild, User } from "@buape/carbon";
-import { evaluateGroupRouteAccessForPolicy } from "openclaw/plugin-sdk/group-access";
-import type { AllowlistMatch } from "../../../../src/channels/allowlist-match.js";
+import type { AllowlistMatch } from "openclaw/plugin-sdk/allow-from";
 import {
   buildChannelKeyCandidates,
   resolveChannelEntryMatchWithFallback,
   resolveChannelMatchConfig,
   type ChannelMatchSource,
-} from "../../../../src/channels/channel-config.js";
+} from "openclaw/plugin-sdk/channel-targets";
+import { evaluateGroupRouteAccessForPolicy } from "openclaw/plugin-sdk/group-access";
 import { formatDiscordUserTag } from "./format.js";
 
 export type DiscordAllowList = {
@@ -29,6 +29,7 @@ type DiscordChannelOverrideConfig = {
   systemPrompt?: string;
   includeThreadStarter?: boolean;
   autoThread?: boolean;
+  autoThreadName?: "message" | "generated";
   autoArchiveDuration?: "60" | "1440" | "4320" | "10080" | 60 | 1440 | 4320 | 10080;
 };
 
@@ -403,6 +404,7 @@ function resolveDiscordChannelConfigEntry(
     systemPrompt: entry.systemPrompt,
     includeThreadStarter: entry.includeThreadStarter,
     autoThread: entry.autoThread,
+    autoThreadName: entry.autoThreadName,
     autoArchiveDuration: entry.autoArchiveDuration,
   };
   return resolved;

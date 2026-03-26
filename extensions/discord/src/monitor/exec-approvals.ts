@@ -10,31 +10,27 @@ import {
   type TopLevelComponents,
 } from "@buape/carbon";
 import { ButtonStyle, Routes } from "discord-api-types/v10";
-import type { OpenClawConfig } from "../../../../src/config/config.js";
-import { loadSessionStore, resolveStorePath } from "../../../../src/config/sessions.js";
-import type { DiscordExecApprovalConfig } from "../../../../src/config/types.discord.js";
-import { GatewayClient } from "../../../../src/gateway/client.js";
-import { createOperatorApprovalsGatewayClient } from "../../../../src/gateway/operator-approvals-client.js";
-import type { EventFrame } from "../../../../src/gateway/protocol/index.js";
-import { resolveExecApprovalCommandDisplay } from "../../../../src/infra/exec-approval-command-display.js";
-import { getExecApprovalApproverDmNoticeText } from "../../../../src/infra/exec-approval-reply.js";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import { loadSessionStore, resolveStorePath } from "openclaw/plugin-sdk/config-runtime";
+import type { DiscordExecApprovalConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { EventFrame } from "openclaw/plugin-sdk/gateway-runtime";
+import * as gatewayRuntime from "openclaw/plugin-sdk/gateway-runtime";
+import { resolveExecApprovalCommandDisplay } from "openclaw/plugin-sdk/infra-runtime";
+import { getExecApprovalApproverDmNoticeText } from "openclaw/plugin-sdk/infra-runtime";
 import type {
   ExecApprovalDecision,
   ExecApprovalRequest,
   ExecApprovalResolved,
-} from "../../../../src/infra/exec-approvals.js";
-import { logDebug, logError } from "../../../../src/logger.js";
+} from "openclaw/plugin-sdk/infra-runtime";
 import {
   normalizeAccountId,
+  normalizeMessageChannel,
   resolveAgentIdFromSessionKey,
-} from "../../../../src/routing/session-key.js";
-import type { RuntimeEnv } from "../../../../src/runtime.js";
-import {
-  compileSafeRegex,
-  testRegexWithBoundedInput,
-} from "../../../../src/security/safe-regex.js";
-import { normalizeMessageChannel } from "../../../../src/utils/message-channel.js";
-import { createDiscordClient, stripUndefinedFields } from "../send.shared.js";
+} from "openclaw/plugin-sdk/routing";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import { compileSafeRegex, testRegexWithBoundedInput } from "openclaw/plugin-sdk/security-runtime";
+import { logDebug, logError } from "openclaw/plugin-sdk/text-runtime";
+import * as sendShared from "../send.shared.js";
 import { DiscordUiContainer } from "../ui.js";
 
 const EXEC_APPROVAL_KEY = "execapproval";
@@ -368,10 +364,21 @@ export type DiscordExecApprovalHandlerOpts = {
   cfg: OpenClawConfig;
   runtime?: RuntimeEnv;
   onResolve?: (id: string, decision: ExecApprovalDecision) => Promise<void>;
+  __testing?: {
+    createGatewayClient?: typeof gatewayRuntime.createOperatorApprovalsGatewayClient;
+    createDiscordClient?: (...args: Parameters<typeof sendShared.createDiscordClient>) => {
+      rest: {
+        post: (...args: unknown[]) => Promise<unknown>;
+        patch: (...args: unknown[]) => Promise<unknown>;
+        delete: (...args: unknown[]) => Promise<unknown>;
+      };
+      request: (fn: () => Promise<unknown>, label: string) => Promise<unknown>;
+    };
+  };
 };
 
 export class DiscordExecApprovalHandler {
-  private gatewayClient: GatewayClient | null = null;
+  private gatewayClient: gatewayRuntime.GatewayClient | null = null;
   private pending = new Map<string, PendingApproval>();
   private requestCache = new Map<string, ExecApprovalRequest>();
   private opts: DiscordExecApprovalHandlerOpts;
@@ -451,7 +458,10 @@ export class DiscordExecApprovalHandler {
 
     logDebug("discord exec approvals: starting handler");
 
-    this.gatewayClient = await createOperatorApprovalsGatewayClient({
+    this.gatewayClient = await (
+      this.opts.__testing?.createGatewayClient ??
+      gatewayRuntime.createOperatorApprovalsGatewayClient
+    )({
       config: this.opts.cfg,
       gatewayUrl: this.opts.gatewayUrl,
       clientDisplayName: "Discord Exec Approvals",
@@ -508,10 +518,9 @@ export class DiscordExecApprovalHandler {
 
     this.requestCache.set(request.id, request);
 
-    const { rest, request: discordRequest } = createDiscordClient(
-      { token: this.opts.token, accountId: this.opts.accountId },
-      this.opts.cfg,
-    );
+    const { rest, request: discordRequest } = (
+      this.opts.__testing?.createDiscordClient ?? sendShared.createDiscordClient
+    )({ token: this.opts.token, accountId: this.opts.accountId }, this.opts.cfg);
 
     const actionRow = new ExecApprovalActionRow(request.id);
     const container = createExecApprovalRequestContainer({
@@ -521,7 +530,7 @@ export class DiscordExecApprovalHandler {
       actionRow,
     });
     const payload = buildExecApprovalPayload(container);
-    const body = stripUndefinedFields(serializePayload(payload));
+    const body = sendShared.stripUndefinedFields(serializePayload(payload));
 
     const target = this.opts.config.target ?? "dm";
     const sendToDm = target === "dm" || target === "both";
@@ -730,10 +739,9 @@ export class DiscordExecApprovalHandler {
     }
 
     try {
-      const { rest, request: discordRequest } = createDiscordClient(
-        { token: this.opts.token, accountId: this.opts.accountId },
-        this.opts.cfg,
-      );
+      const { rest, request: discordRequest } = (
+        this.opts.__testing?.createDiscordClient ?? sendShared.createDiscordClient
+      )({ token: this.opts.token, accountId: this.opts.accountId }, this.opts.cfg);
 
       await discordRequest(
         () => rest.delete(Routes.channelMessage(channelId, messageId)) as Promise<void>,
@@ -751,16 +759,15 @@ export class DiscordExecApprovalHandler {
     container: DiscordUiContainer,
   ): Promise<void> {
     try {
-      const { rest, request: discordRequest } = createDiscordClient(
-        { token: this.opts.token, accountId: this.opts.accountId },
-        this.opts.cfg,
-      );
+      const { rest, request: discordRequest } = (
+        this.opts.__testing?.createDiscordClient ?? sendShared.createDiscordClient
+      )({ token: this.opts.token, accountId: this.opts.accountId }, this.opts.cfg);
       const payload = buildExecApprovalPayload(container);
 
       await discordRequest(
         () =>
           rest.patch(Routes.channelMessage(channelId, messageId), {
-            body: stripUndefinedFields(serializePayload(payload)),
+            body: sendShared.stripUndefinedFields(serializePayload(payload)),
           }),
         "update-approval",
       );
