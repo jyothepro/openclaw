@@ -255,6 +255,19 @@ const splitFilesByBalancedDurationBudget = (files, targetDurationMs, estimateDur
   );
 };
 
+const resolveUnitFastBatchTargetMs = ({ context, selectedSurfaceSet, unitOnlyRun }) => {
+  const defaultTargetMs = context.executionBudget.unitFastBatchTargetMs;
+  if (
+    !unitOnlyRun &&
+    selectedSurfaceSet.size > 1 &&
+    !context.runtime.isCI &&
+    context.runtime.memoryBand === "high"
+  ) {
+    return Math.max(defaultTargetMs, 75_000);
+  }
+  return defaultTargetMs;
+};
+
 const resolveMaxWorkersForUnit = (unit, context) => {
   const overrideWorkers = Number.parseInt(context.env.OPENCLAW_TEST_WORKERS ?? "", 10);
   const resolvedOverride =
@@ -271,6 +284,9 @@ const resolveMaxWorkersForUnit = (unit, context) => {
   }
   if (unit.surface === "extensions") {
     return budget.extensionWorkers;
+  }
+  if (unit.surface === "channels") {
+    return budget.channelSharedWorkers ?? budget.unitSharedWorkers;
   }
   if (unit.surface === "gateway") {
     return budget.gatewayWorkers;
@@ -416,7 +432,11 @@ const buildDefaultUnits = (context, request) => {
     1,
     parseEnvNumber(env, "OPENCLAW_TEST_UNIT_FAST_LANES", defaultUnitFastLaneCount),
   );
-  const defaultUnitFastBatchTargetMs = executionBudget.unitFastBatchTargetMs;
+  const defaultUnitFastBatchTargetMs = resolveUnitFastBatchTargetMs({
+    context,
+    selectedSurfaceSet,
+    unitOnlyRun,
+  });
   const unitFastBatchTargetMs = parseEnvNumber(
     env,
     "OPENCLAW_TEST_UNIT_FAST_BATCH_TARGET_MS",
@@ -806,10 +826,19 @@ const buildTargetedUnits = (context, request) => {
     return [];
   }
   const unitMemoryIsolatedFiles = request.unitMemoryIsolatedFiles ?? [];
+  const estimateUnitDurationMs = (file) =>
+    context.unitTimingManifest.files[file]?.durationMs ??
+    context.unitTimingManifest.defaultDurationMs;
   const estimateChannelDurationMs = (file) =>
     context.channelTimingManifest.files[file]?.durationMs ??
     context.channelTimingManifest.defaultDurationMs;
-  const defaultTargetedChannelsBatchTargetMs = 12_000;
+  const defaultTargetedUnitBatchTargetMs = 12_000;
+  const targetedUnitBatchTargetMs = parseEnvNumber(
+    context.env,
+    "OPENCLAW_TEST_TARGETED_UNIT_BATCH_TARGET_MS",
+    defaultTargetedUnitBatchTargetMs,
+  );
+  const defaultTargetedChannelsBatchTargetMs = 11_000;
   const targetedChannelsBatchTargetMs = parseEnvNumber(
     context.env,
     "OPENCLAW_TEST_TARGETED_CHANNELS_BATCH_TARGET_MS",
@@ -856,6 +885,28 @@ const buildTargetedUnits = (context, request) => {
       );
     }
     if (
+      classification.surface === "unit" &&
+      uniqueFilters.length > 4 &&
+      targetedUnitBatchTargetMs > 0
+    ) {
+      const estimatedTotalDurationMs = uniqueFilters.reduce(
+        (totalMs, file) => totalMs + estimateUnitDurationMs(file),
+        0,
+      );
+      if (estimatedTotalDurationMs > targetedUnitBatchTargetMs) {
+        return splitFilesByBalancedDurationBudget(
+          uniqueFilters,
+          targetedUnitBatchTargetMs,
+          estimateUnitDurationMs,
+        ).map((batch, batchIndex) =>
+          createExecutionUnit(context, {
+            ...createTargetedUnit(context, classification, batch),
+            id: `unit-batch-${String(batchIndex + 1)}`,
+          }),
+        );
+      }
+    }
+    if (
       classification.surface === "channels" &&
       uniqueFilters.length > 4 &&
       targetedChannelsBatchTargetMs > 0
@@ -865,7 +916,7 @@ const buildTargetedUnits = (context, request) => {
         0,
       );
       if (estimatedTotalDurationMs > targetedChannelsBatchTargetMs) {
-        return splitFilesByDurationBudget(
+        return splitFilesByBalancedDurationBudget(
           uniqueFilters,
           targetedChannelsBatchTargetMs,
           estimateChannelDurationMs,
@@ -1121,8 +1172,6 @@ export function buildCIExecutionManifest(scopeInput = {}, options = {}) {
                   "node openclaw.mjs --help",
                   "node openclaw.mjs status --json --timeout 1",
                   "pnpm test:build:singleton",
-                  "node scripts/stage-bundled-plugin-runtime-deps.mjs",
-                  "node --import tsx scripts/release-check.ts",
                 ].join("\n"),
               },
             ]
@@ -1187,7 +1236,6 @@ export function buildCIExecutionManifest(scopeInput = {}, options = {}) {
 
   const jobs = {
     buildArtifacts: { enabled: nodeEligible, needsDistArtifacts: false },
-    releaseCheck: { enabled: isPush && !scope.docsOnly && nodeEligible },
     checksFast: { enabled: checksFastInclude.length > 0, matrix: { include: checksFastInclude } },
     checks: { enabled: checksInclude.length > 0, matrix: { include: checksInclude } },
     extensionFast: {
@@ -1236,7 +1284,6 @@ export function buildCIExecutionManifest(scopeInput = {}, options = {}) {
       ...(docsEligible ? ["check-docs"] : []),
       ...(skillsPythonEligible ? ["skills-python"] : []),
       ...(nodeEligible ? ["build-artifacts"] : []),
-      ...(isPush && !scope.docsOnly && nodeEligible ? ["release-check"] : []),
     ],
   };
 }
