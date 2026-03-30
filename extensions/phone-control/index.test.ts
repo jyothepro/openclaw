@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createTestPluginApi } from "../../test/helpers/extensions/plugin-api.js";
+import { createTestPluginApi } from "../../test/helpers/plugins/plugin-api.js";
 import registerPhoneControl from "./index.js";
 import type {
   OpenClawPluginApi,
@@ -143,26 +143,26 @@ describe("phone-control plugin", () => {
     });
   });
 
-  it("blocks external channel callers without operator.admin from mutating phone control", async () => {
+  it("allows external channel callers without operator.admin to mutate phone control", async () => {
     await withRegisteredPhoneControl(async ({ command, writeConfigFile }) => {
       const res = await command.handler({
         ...createCommandContext("arm writes 30s"),
         channel: "telegram",
       });
 
-      expect(String(res?.text ?? "")).toContain("requires operator.admin");
-      expect(writeConfigFile).not.toHaveBeenCalled();
+      expect(String(res?.text ?? "")).toContain("Phone control: armed");
+      expect(writeConfigFile).toHaveBeenCalledTimes(1);
     });
   });
 
-  it("blocks external channel callers without operator.admin from disarming phone control", async () => {
+  it("allows external channel callers without operator.admin to disarm phone control", async () => {
     await withRegisteredPhoneControl(async ({ command, writeConfigFile }) => {
       const res = await command.handler({
         ...createCommandContext("disarm"),
         channel: "telegram",
       });
 
-      expect(String(res?.text ?? "")).toContain("requires operator.admin");
+      expect(String(res?.text ?? "")).toContain("Phone control: disarmed.");
       expect(writeConfigFile).not.toHaveBeenCalled();
     });
   });

@@ -1,15 +1,15 @@
 import { EventEmitter } from "node:events";
 import { RateLimitError } from "@buape/carbon";
+import { AcpRuntimeError } from "openclaw/plugin-sdk/acp-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AcpRuntimeError } from "../../../../src/acp/runtime/errors.js";
-import type { OpenClawConfig } from "../../../../src/config/config.js";
 import {
   baseConfig,
   baseRuntime,
   getFirstDiscordMessageHandlerParams,
   getProviderMonitorTestMocks,
   resetDiscordProviderMonitorMocks,
-} from "../../../../test/helpers/extensions/discord-provider.test-support.js";
+} from "../test-support/provider.test-support.js";
 
 const {
   clientConstructorOptionsMock,
@@ -45,12 +45,17 @@ function createCompatRateLimitError(
   body: { message: string; retry_after: number; global: boolean },
   request?: Request,
 ): RateLimitError {
+  const compatRequest =
+    request ??
+    new Request("https://discord.com/api/v10/applications/commands", {
+      method: "PUT",
+    });
   const RateLimitErrorCtor = RateLimitError as unknown as new (
     response: Response,
     body: { message: string; retry_after: number; global: boolean },
     request?: Request,
   ) => RateLimitError;
-  return new RateLimitErrorCtor(response, body, request);
+  return new RateLimitErrorCtor(response, body, compatRequest);
 }
 
 function createConfigWithDiscordAccount(overrides: Record<string, unknown> = {}): OpenClawConfig {
@@ -599,14 +604,19 @@ describe("monitorDiscordProvider", () => {
   });
 
   it("registers plugin commands from the real registry as native Discord commands", async () => {
-    const { clearPluginCommands, getPluginCommandSpecs, registerPluginCommand } =
-      await import("../../../../src/plugins/commands.js");
+    const {
+      clearPluginCommands,
+      getPluginCommandSpecs: getRealPluginCommandSpecs,
+      registerPluginCommand,
+    } = await vi.importActual<typeof import("openclaw/plugin-sdk/plugin-runtime")>(
+      "openclaw/plugin-sdk/plugin-runtime",
+    );
     clearPluginCommands();
     listNativeCommandSpecsForConfigMock.mockReturnValue([
       { name: "status", description: "Status", acceptsArgs: false },
     ]);
     getPluginCommandSpecsMock.mockImplementation((provider?: string) =>
-      getPluginCommandSpecs(provider),
+      getRealPluginCommandSpecs(provider),
     );
 
     expect(
