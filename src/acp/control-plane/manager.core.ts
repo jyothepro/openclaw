@@ -4,10 +4,11 @@ import { logVerbose } from "../../globals.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { isAcpSessionKey } from "../../sessions/session-key-utils.js";
 import {
-  createTaskRecord,
-  markTaskRunningByRunId,
-  markTaskTerminalByRunId,
-} from "../../tasks/task-registry.js";
+  createRunningTaskRun,
+  completeTaskRunByRunId,
+  failTaskRunByRunId,
+  startTaskRunByRunId,
+} from "../../tasks/task-executor.js";
 import type { DeliveryContext } from "../../utils/delivery-context.js";
 import {
   AcpRuntimeError,
@@ -789,6 +790,7 @@ export class AcpSessionManager {
                   }
                   if (taskContext) {
                     this.markBackgroundTaskRunning(taskContext.runId, {
+                      sessionKey,
                       lastEventAt: Date.now(),
                       progressSummary: taskProgressSummary || null,
                     });
@@ -834,6 +836,7 @@ export class AcpSessionManager {
             if (taskContext) {
               const terminalResult = resolveBackgroundTaskTerminalResult(taskProgressSummary);
               this.markBackgroundTaskTerminal(taskContext.runId, {
+                sessionKey,
                 status: "succeeded",
                 endedAt: Date.now(),
                 lastEventAt: Date.now(),
@@ -873,6 +876,7 @@ export class AcpSessionManager {
             });
             if (taskContext) {
               this.markBackgroundTaskTerminal(taskContext.runId, {
+                sessionKey,
                 status: resolveBackgroundTaskFailureStatus(acpError),
                 endedAt: Date.now(),
                 lastEventAt: Date.now(),
@@ -1880,16 +1884,16 @@ export class AcpSessionManager {
 
   private createBackgroundTaskRecord(context: BackgroundTaskContext, startedAt: number): void {
     try {
-      createTaskRecord({
+      createRunningTaskRun({
         runtime: "acp",
         sourceId: context.runId,
-        requesterSessionKey: context.requesterSessionKey,
+        ownerKey: context.requesterSessionKey,
+        scopeKind: "session",
         requesterOrigin: context.requesterOrigin,
         childSessionKey: context.childSessionKey,
         runId: context.runId,
         label: context.label,
         task: context.task,
-        status: "running",
         startedAt,
       });
     } catch (error) {
@@ -1902,13 +1906,16 @@ export class AcpSessionManager {
   private markBackgroundTaskRunning(
     runId: string,
     params: {
+      sessionKey?: string;
       lastEventAt?: number;
       progressSummary?: string | null;
     },
   ): void {
     try {
-      markTaskRunningByRunId({
+      startTaskRunByRunId({
         runId,
+        runtime: "acp",
+        sessionKey: params.sessionKey,
         lastEventAt: params.lastEventAt,
         progressSummary: params.progressSummary,
       });
@@ -1920,6 +1927,7 @@ export class AcpSessionManager {
   private markBackgroundTaskTerminal(
     runId: string,
     params: {
+      sessionKey?: string;
       status: "succeeded" | "failed" | "timed_out";
       endedAt: number;
       lastEventAt?: number;
@@ -1930,15 +1938,29 @@ export class AcpSessionManager {
     },
   ): void {
     try {
-      markTaskTerminalByRunId({
+      if (params.status === "succeeded") {
+        completeTaskRunByRunId({
+          runId,
+          runtime: "acp",
+          sessionKey: params.sessionKey,
+          endedAt: params.endedAt,
+          lastEventAt: params.lastEventAt,
+          progressSummary: params.progressSummary,
+          terminalSummary: params.terminalSummary,
+          terminalOutcome: params.terminalOutcome,
+        });
+        return;
+      }
+      failTaskRunByRunId({
         runId,
+        runtime: "acp",
+        sessionKey: params.sessionKey,
         status: params.status,
         endedAt: params.endedAt,
         lastEventAt: params.lastEventAt,
         error: params.error,
         progressSummary: params.progressSummary,
         terminalSummary: params.terminalSummary,
-        terminalOutcome: params.terminalOutcome,
       });
     } catch (error) {
       logVerbose(`acp-manager: failed updating background task for ${runId}: ${String(error)}`);

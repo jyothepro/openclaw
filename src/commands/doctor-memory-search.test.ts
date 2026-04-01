@@ -1,14 +1,19 @@
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import type { checkQmdBinaryAvailability as checkQmdBinaryAvailabilityFn } from "../plugin-sdk/memory-core-host-engine-qmd.js";
 
 const note = vi.hoisted(() => vi.fn());
 const resolveDefaultAgentId = vi.hoisted(() => vi.fn(() => "agent-default"));
 const resolveAgentDir = vi.hoisted(() => vi.fn(() => "/tmp/agent-default"));
+const resolveAgentWorkspaceDir = vi.hoisted(() => vi.fn(() => "/tmp/agent-default/workspace"));
 const resolveMemorySearchConfig = vi.hoisted(() => vi.fn());
 const resolveApiKeyForProvider = vi.hoisted(() => vi.fn());
 const resolveActiveMemoryBackendConfig = vi.hoisted(() => vi.fn());
-const checkQmdBinaryAvailability = vi.hoisted(() => vi.fn(async () => ({ available: true })));
+type CheckQmdBinaryAvailability = typeof checkQmdBinaryAvailabilityFn;
+const checkQmdBinaryAvailability = vi.hoisted(() =>
+  vi.fn<CheckQmdBinaryAvailability>(async () => ({ available: true })),
+);
 
 vi.mock("../terminal/note.js", () => ({
   note,
@@ -17,6 +22,7 @@ vi.mock("../terminal/note.js", () => ({
 vi.mock("../agents/agent-scope.js", () => ({
   resolveDefaultAgentId,
   resolveAgentDir,
+  resolveAgentWorkspaceDir,
 }));
 
 vi.mock("../agents/memory-search.js", () => ({
@@ -58,6 +64,7 @@ describe("noteMemorySearchHealth", () => {
     note.mockClear();
     resolveDefaultAgentId.mockClear();
     resolveAgentDir.mockClear();
+    resolveAgentWorkspaceDir.mockClear();
     resolveMemorySearchConfig.mockReset();
     resolveApiKeyForProvider.mockReset();
     resolveApiKeyForProvider.mockRejectedValue(new Error("missing key"));
@@ -137,6 +144,11 @@ describe("noteMemorySearchHealth", () => {
     await noteMemorySearchHealth(cfg, {});
 
     expect(note).not.toHaveBeenCalled();
+    expect(checkQmdBinaryAvailability).toHaveBeenCalledWith({
+      command: "qmd",
+      env: process.env,
+      cwd: "/tmp/agent-default/workspace",
+    });
   });
 
   it("warns when QMD backend is active but the qmd binary is unavailable", async () => {

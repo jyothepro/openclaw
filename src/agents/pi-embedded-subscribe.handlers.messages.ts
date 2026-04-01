@@ -1,7 +1,7 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
-import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
 import {
@@ -38,6 +38,9 @@ const stripTrailingDirective = (text: string): string => {
   return text.slice(0, openIndex);
 };
 
+const coerceText = (value: unknown): string =>
+  typeof value === "string" ? value : value == null ? "" : String(value);
+
 function isTranscriptOnlyOpenClawAssistantMessage(message: AgentMessage | undefined): boolean {
   if (!message || message.role !== "assistant") {
     return false;
@@ -56,16 +59,17 @@ function emitReasoningEnd(ctx: EmbeddedPiSubscribeContext) {
 }
 
 export function resolveSilentReplyFallbackText(params: {
-  text: string;
+  text: unknown;
   messagingToolSentTexts: string[];
 }): string {
-  const trimmed = params.text.trim();
+  const text = coerceText(params.text);
+  const trimmed = text.trim();
   if (trimmed !== SILENT_REPLY_TOKEN) {
-    return params.text;
+    return text;
   }
-  const fallback = params.messagingToolSentTexts.at(-1)?.trim();
+  const fallback = coerceText(params.messagingToolSentTexts.at(-1)).trim();
   if (!fallback) {
-    return params.text;
+    return text;
   }
   return fallback;
 }
@@ -357,7 +361,7 @@ export function handleMessageEnd(
   }
   promoteThinkingTagsToBlocks(assistantMessage);
 
-  const rawText = extractAssistantText(assistantMessage);
+  const rawText = coerceText(extractAssistantText(assistantMessage));
   appendRawStream({
     ts: Date.now(),
     event: "assistant_message_end",
@@ -382,7 +386,7 @@ export function handleMessageEnd(
   let { mediaUrls, hasMedia } = resolveSendableOutboundReplyParts(parsedText ?? {});
 
   if (!cleanedText && !hasMedia && !ctx.params.enforceFinalTag) {
-    const rawTrimmed = rawText.trim();
+    const rawTrimmed = coerceText(rawText).trim();
     const rawStrippedFinal = rawTrimmed.replace(/<\s*\/?\s*final\s*>/gi, "").trim();
     const rawCandidate = rawStrippedFinal || rawTrimmed;
     if (rawCandidate) {
@@ -392,7 +396,11 @@ export function handleMessageEnd(
     }
   }
 
-  if (!ctx.params.silentExpected && !ctx.state.emittedAssistantUpdate && (cleanedText || hasMedia)) {
+  if (
+    !ctx.params.silentExpected &&
+    !ctx.state.emittedAssistantUpdate &&
+    (cleanedText || hasMedia)
+  ) {
     const data = buildAssistantStreamData({
       text: cleanedText,
       delta: cleanedText,
@@ -518,6 +526,14 @@ export function handleMessageEnd(
 
   if (!ctx.params.silentExpected && ctx.state.blockReplyBreak === "text_end" && onBlockReply) {
     emitSplitResultAsBlockReply(ctx.consumeReplyDirectives("", { final: true }));
+  }
+
+  if (
+    !ctx.params.silentExpected &&
+    ctx.state.blockReplyBreak === "message_end" &&
+    ctx.params.onBlockReplyFlush
+  ) {
+    void ctx.params.onBlockReplyFlush();
   }
 
   ctx.state.deltaBuffer = "";

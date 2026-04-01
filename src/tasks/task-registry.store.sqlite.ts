@@ -10,7 +10,8 @@ type TaskRegistryRow = {
   task_id: string;
   runtime: TaskRecord["runtime"];
   source_id: string | null;
-  requester_session_key: string;
+  owner_key: string;
+  scope_kind: TaskRecord["scopeKind"];
   child_session_key: string | null;
   parent_task_id: string | null;
   agent_id: string | null;
@@ -37,10 +38,14 @@ type TaskDeliveryStateRow = {
   last_notified_event_at: number | bigint | null;
 };
 
+type TableInfoRow = {
+  name: string;
+};
+
 type TaskRegistryStatements = {
   selectAll: StatementSync;
   selectAllDeliveryStates: StatementSync;
-  replaceRow: StatementSync;
+  upsertRow: StatementSync;
   replaceDeliveryState: StatementSync;
   deleteRow: StatementSync;
   deleteDeliveryState: StatementSync;
@@ -57,7 +62,7 @@ type TaskRegistryDatabase = {
 let cachedDatabase: TaskRegistryDatabase | null = null;
 const TASK_REGISTRY_DIR_MODE = 0o700;
 const TASK_REGISTRY_FILE_MODE = 0o600;
-const TASK_REGISTRY_SIDEcar_SUFFIXES = ["", "-shm", "-wal"] as const;
+const TASK_REGISTRY_SIDECAR_SUFFIXES = ["", "-shm", "-wal"] as const;
 
 function normalizeNumber(value: number | bigint | null): number | undefined {
   if (typeof value === "bigint") {
@@ -90,7 +95,9 @@ function rowToTaskRecord(row: TaskRegistryRow): TaskRecord {
     taskId: row.task_id,
     runtime: row.runtime,
     ...(row.source_id ? { sourceId: row.source_id } : {}),
-    requesterSessionKey: row.requester_session_key,
+    requesterSessionKey: row.scope_kind === "system" ? "" : row.owner_key,
+    ownerKey: row.owner_key,
+    scopeKind: row.scope_kind,
     ...(row.child_session_key ? { childSessionKey: row.child_session_key } : {}),
     ...(row.parent_task_id ? { parentTaskId: row.parent_task_id } : {}),
     ...(row.agent_id ? { agentId: row.agent_id } : {}),
@@ -127,7 +134,8 @@ function bindTaskRecord(record: TaskRecord) {
     task_id: record.taskId,
     runtime: record.runtime,
     source_id: record.sourceId ?? null,
-    requester_session_key: record.requesterSessionKey,
+    owner_key: record.ownerKey,
+    scope_kind: record.scopeKind,
     child_session_key: record.childSessionKey ?? null,
     parent_task_id: record.parentTaskId ?? null,
     agent_id: record.agentId ?? null,
@@ -164,7 +172,8 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         task_id,
         runtime,
         source_id,
-        requester_session_key,
+        owner_key,
+        scope_kind,
         child_session_key,
         parent_task_id,
         agent_id,
@@ -194,12 +203,13 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
       FROM task_delivery_state
       ORDER BY task_id ASC
     `),
-    replaceRow: db.prepare(`
-      INSERT OR REPLACE INTO task_runs (
+    upsertRow: db.prepare(`
+      INSERT INTO task_runs (
         task_id,
         runtime,
         source_id,
-        requester_session_key,
+        owner_key,
+        scope_kind,
         child_session_key,
         parent_task_id,
         agent_id,
@@ -222,7 +232,8 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         @task_id,
         @runtime,
         @source_id,
-        @requester_session_key,
+        @owner_key,
+        @scope_kind,
         @child_session_key,
         @parent_task_id,
         @agent_id,
@@ -242,6 +253,29 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         @terminal_summary,
         @terminal_outcome
       )
+      ON CONFLICT(task_id) DO UPDATE SET
+        runtime = excluded.runtime,
+        source_id = excluded.source_id,
+        owner_key = excluded.owner_key,
+        scope_kind = excluded.scope_kind,
+        child_session_key = excluded.child_session_key,
+        parent_task_id = excluded.parent_task_id,
+        agent_id = excluded.agent_id,
+        run_id = excluded.run_id,
+        label = excluded.label,
+        task = excluded.task,
+        status = excluded.status,
+        delivery_status = excluded.delivery_status,
+        notify_policy = excluded.notify_policy,
+        created_at = excluded.created_at,
+        started_at = excluded.started_at,
+        ended_at = excluded.ended_at,
+        last_event_at = excluded.last_event_at,
+        cleanup_after = excluded.cleanup_after,
+        error = excluded.error,
+        progress_summary = excluded.progress_summary,
+        terminal_summary = excluded.terminal_summary,
+        terminal_outcome = excluded.terminal_outcome
     `),
     replaceDeliveryState: db.prepare(`
       INSERT OR REPLACE INTO task_delivery_state (
@@ -261,13 +295,50 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
   };
 }
 
+function hasTaskRunsColumn(db: DatabaseSync, columnName: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(task_runs)`).all() as TableInfoRow[];
+  return rows.some((row) => row.name === columnName);
+}
+
+function migrateLegacyOwnerColumns(db: DatabaseSync) {
+  if (!hasTaskRunsColumn(db, "owner_key")) {
+    db.exec(`ALTER TABLE task_runs ADD COLUMN owner_key TEXT;`);
+  }
+  if (!hasTaskRunsColumn(db, "scope_kind")) {
+    db.exec(`ALTER TABLE task_runs ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'session';`);
+  }
+  if (hasTaskRunsColumn(db, "requester_session_key")) {
+    db.exec(`
+      UPDATE task_runs
+      SET owner_key = requester_session_key
+      WHERE owner_key IS NULL
+    `);
+  }
+  db.exec(`
+    UPDATE task_runs
+    SET owner_key = CASE
+      WHEN trim(COALESCE(owner_key, '')) <> '' THEN trim(owner_key)
+      ELSE 'system:' || runtime || ':' || COALESCE(NULLIF(source_id, ''), task_id)
+    END
+  `);
+  db.exec(`
+    UPDATE task_runs
+    SET scope_kind = CASE
+      WHEN scope_kind = 'system' THEN 'system'
+      WHEN owner_key LIKE 'system:%' THEN 'system'
+      ELSE 'session'
+    END
+  `);
+}
+
 function ensureSchema(db: DatabaseSync) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS task_runs (
       task_id TEXT PRIMARY KEY,
       runtime TEXT NOT NULL,
       source_id TEXT,
-      requester_session_key TEXT NOT NULL,
+      owner_key TEXT NOT NULL,
+      scope_kind TEXT NOT NULL,
       child_session_key TEXT,
       parent_task_id TEXT,
       agent_id TEXT,
@@ -288,6 +359,7 @@ function ensureSchema(db: DatabaseSync) {
       terminal_outcome TEXT
     );
   `);
+  migrateLegacyOwnerColumns(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS task_delivery_state (
       task_id TEXT PRIMARY KEY,
@@ -300,6 +372,7 @@ function ensureSchema(db: DatabaseSync) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_status ON task_runs(runtime, status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_cleanup_after ON task_runs(cleanup_after);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_last_event_at ON task_runs(last_event_at);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_owner_key ON task_runs(owner_key);`);
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_task_runs_child_session_key ON task_runs(child_session_key);`,
   );
@@ -309,7 +382,7 @@ function ensureTaskRegistryPermissions(pathname: string) {
   const dir = resolveTaskRegistryDir(process.env);
   mkdirSync(dir, { recursive: true, mode: TASK_REGISTRY_DIR_MODE });
   chmodSync(dir, TASK_REGISTRY_DIR_MODE);
-  for (const suffix of TASK_REGISTRY_SIDEcar_SUFFIXES) {
+  for (const suffix of TASK_REGISTRY_SIDECAR_SUFFIXES) {
     const candidate = `${pathname}${suffix}`;
     if (!existsSync(candidate)) {
       continue;
@@ -331,7 +404,7 @@ function openTaskRegistryDatabase(): TaskRegistryDatabase {
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(pathname);
   db.exec(`PRAGMA journal_mode = WAL;`);
-  db.exec(`PRAGMA synchronous = NORMAL;`);
+  db.exec(`PRAGMA synchronous = FULL;`);
   db.exec(`PRAGMA busy_timeout = 5000;`);
   ensureSchema(db);
   ensureTaskRegistryPermissions(pathname);
@@ -371,7 +444,7 @@ export function saveTaskRegistryStateToSqlite(snapshot: TaskRegistryStoreSnapsho
     statements.clearDeliveryStates.run();
     statements.clearRows.run();
     for (const task of snapshot.tasks.values()) {
-      statements.replaceRow.run(bindTaskRecord(task));
+      statements.upsertRow.run(bindTaskRecord(task));
     }
     for (const state of snapshot.deliveryStates.values()) {
       statements.replaceDeliveryState.run(bindTaskDeliveryState(state));
@@ -381,8 +454,22 @@ export function saveTaskRegistryStateToSqlite(snapshot: TaskRegistryStoreSnapsho
 
 export function upsertTaskRegistryRecordToSqlite(task: TaskRecord) {
   const store = openTaskRegistryDatabase();
-  store.statements.replaceRow.run(bindTaskRecord(task));
+  store.statements.upsertRow.run(bindTaskRecord(task));
   ensureTaskRegistryPermissions(store.path);
+}
+
+export function upsertTaskWithDeliveryStateToSqlite(params: {
+  task: TaskRecord;
+  deliveryState?: TaskDeliveryState;
+}) {
+  withWriteTransaction((statements) => {
+    statements.upsertRow.run(bindTaskRecord(params.task));
+    if (params.deliveryState) {
+      statements.replaceDeliveryState.run(bindTaskDeliveryState(params.deliveryState));
+    } else {
+      statements.deleteDeliveryState.run(params.task.taskId);
+    }
+  });
 }
 
 export function deleteTaskRegistryRecordFromSqlite(taskId: string) {
@@ -390,6 +477,13 @@ export function deleteTaskRegistryRecordFromSqlite(taskId: string) {
   store.statements.deleteRow.run(taskId);
   store.statements.deleteDeliveryState.run(taskId);
   ensureTaskRegistryPermissions(store.path);
+}
+
+export function deleteTaskAndDeliveryStateFromSqlite(taskId: string) {
+  withWriteTransaction((statements) => {
+    statements.deleteRow.run(taskId);
+    statements.deleteDeliveryState.run(taskId);
+  });
 }
 
 export function upsertTaskDeliveryStateToSqlite(state: TaskDeliveryState) {
